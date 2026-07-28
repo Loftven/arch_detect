@@ -4,8 +4,10 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import LabelEncoder
 from sklearn.ensemble import RandomForestClassifier
+from itertools import pairwise
 import os
 from matplotlib import pyplot as plt
+import argparse
 from elftools.elf.elffile import ELFFile
 
 DIR = 'Signatures'
@@ -30,7 +32,7 @@ def get_files(curdir='.') -> list:
         raise Exception
 
 
-def make_pd(files: list):
+def make_pd(files: list, make_signatures=False):
     """Create gold dataframe with example of Velocity Bytes Characteristic.
     :files -> list wit filenames, containing signatures for various architectures
     :return -> DataFrame
@@ -42,16 +44,15 @@ def make_pd(files: list):
         cur_df = cur_df.T
         cur_df['class'] = file.split('.')[0]
 
-        ############## Uncomment for creating Bars with VBC for golden files###########################
-        # fig = plt.figure()
-        #
-        # plt.bar(cur_df.columns[:len(cur_df.columns) - 1], cur_df.drop(['class'], axis=1).values[0])
-        # plt.xlabel("Byte")
-        # plt.ylabel("P")
-        # plt.yticks([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8])
-        # plt.savefig(f'{file.split(".")[0]}.png')
-        # fig.clear()
-        ###############################################################################################
+        if make_signatures:
+            fig = plt.figure()
+
+            plt.bar(cur_df.columns[:len(cur_df.columns) - 1], cur_df.drop(['class'], axis=1).values[0])
+            plt.xlabel("Byte")
+            plt.ylabel("P")
+            plt.yticks([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8])
+            plt.savefig(f'{file.split(".")[0]}.png')
+            fig.clear()
 
         result_df = pd.concat([result_df, cur_df], ignore_index=True)
         print()
@@ -74,9 +75,10 @@ def make_dir_results(path=BASE_PATH / 'experiment' / 'elf_arch_upxed'):
     :path -> specify directory that contains packed files.
     :return -> None
     """
-    for root, dirs, files in os.walk(path):
-        for file in files:
-            make_dir_orig_files(file)
+    if not path.exists():
+        for root, dirs, files in os.walk(path):
+            for file in files:
+                make_dir_orig_files(file)
 
 
 def draw_bar(dataframe, save_name='test2.png'):
@@ -92,14 +94,14 @@ def draw_bar(dataframe, save_name='test2.png'):
     plt.savefig(save_name)
 
 
-def parse_bin(name='test_2', path=BASE_PATH/'Tests', simple=True):
+def parse_bin(name='test_2', path=BASE_PATH/'Tests', simple=True, byte_range=None):
     """Parse bin with aim to create Velocity Bytes Characteristic, produce dataframe
     :name -> researched file
     :path -> relative path to folder, contains researched file
     :simple -> specify if the file is packed. If True the file is not packed, otherwise you have to specify
     bytes with assembler instructions
     :return DataFrame() -> df contains Velocity Bytes Characteristic"""
-    data = list()
+    data = bytearray()
     size = None
 
     if simple:
@@ -122,9 +124,16 @@ def parse_bin(name='test_2', path=BASE_PATH/'Tests', simple=True):
             full_data = f.read()
 
             # Specify bytes ranges, that have asm code here:
-            data = full_data[0x77eb8:0x7804c] + full_data[0x78100:0x781d8] + full_data[0x78258:0x78290]
+            data = bytearray()
+            for section in byte_range:
+                print(f"current section locates in file via offset [{hex(section[0])}:{hex(section[1])}]")
+                data += full_data[section[0]:section[1]]
+
+            # C:\Users\ilya1\PycharmProjects\binary_knn\experiment\elf_arch_upxed\test_Amd64_upx -d -v -a --range 0x5e6a0 0x5e7e2 0x5e8bc 0x5e939
+            #data = full_data[0x5e6a0:0x5e7e2] + full_data[0x5e8bc:0x5e939]
             size = len(data)
 
+    # Error !TODO resolve this fucking error !!!!!!!!!!!
     lst = [data.count(x) for x in range(256)]
     lst2 = [x / size for x in lst]
     maximum = max(lst2)
@@ -133,65 +142,168 @@ def parse_bin(name='test_2', path=BASE_PATH/'Tests', simple=True):
     return pd.DataFrame(norm).T
 
 
+def main():
+    parser = argparse.ArgumentParser(description="Detect the architecture of an executable file using ML!")
+    parser.add_argument("filename", help="path to your executable file")
+    parser.add_argument("-d", "--detect", action="store_true", help="Try to detect architecture using 3 ML algorithms")
+    parser.add_argument("-a", "--advanced", action="store_true", help="advanced mode, you have to specify byte range "
+                                                                      "where asm instructions are located manually. It "
+                                                                      "helps when file is packed and you can't parse "
+                                                                      "instructions automatically as section 'code' "
+                                                                      "does not exists")
+    parser.add_argument("--range", nargs="*", type=str)
+    parser.add_argument("-g", "--gold", help='make folder "Signatures" with gold graphs for all architectures')
+    parser.add_argument("-o", "--output", default="res.txt", help="File for output")
+    parser.add_argument("-v", "--verbose", help="verbose mode", action="store_true")
+
+    # group = parser.add_mutually_exclusive_group()
+    # group.add_argument("--gold", action='store_true')
+    # group.add_argument("--detect", action='store_true')
+
+    args = parser.parse_args()
+    t_file = args.filename
+
+    if args.verbose:
+        print(f"Target file: {t_file}")
+
+    if args.gold:
+        make_pd(get_files(DIR), make_signatures=True)
+
+    if args.detect:
+        p = Path(t_file)
+
+        if args.advanced:
+            target_ranges = []
+            for st, end in pairwise(args.range):
+                target_ranges.append([int(st, 16), int(end, 16)])
+
+            if args.verbose:
+                print(f"Advanced mode, program trying to retrieve bytes and analyze them")
+
+            anon_file = parse_bin(name=p.name, path=p.parent, simple=False, byte_range=target_ranges)
+
+        else:
+            anon_file = parse_bin(name=p.name, path=p.parent)
+
+        draw_bar(anon_file, save_name=str(p.name))
+        bin_files = get_files(DIR)
+        bin_classes = [name.split('.')[0] for name in bin_files]
+        gold_df = make_pd(bin_files)
+
+        # encode labels
+        lb = LabelEncoder()
+        gold_df['labels'] = lb.fit_transform(gold_df['class'])
+        gold_df = gold_df.drop(['class'], axis=1)
+
+        # Start making KNN clf
+        x_train = gold_df.drop(['labels'], axis=1)
+        y_train = gold_df['labels']
+
+        # KNN clf
+        kn_clf = KNeighborsClassifier(n_neighbors=3)
+        kn_clf.fit(x_train, y_train)
+
+        with open(p.parent / args.output, 'w') as f:
+            y_predicts = kn_clf.predict(anon_file)
+
+            if args.verbose:
+                print(f'Knn classifier: {lb.inverse_transform(y_predicts)}')
+                print(f'Knn probabilities: {kn_clf.predict_proba(anon_file)}')
+                print('\n')
+
+            print(f'Knn classifier: {lb.inverse_transform(y_predicts)}', file=f)
+            print(f'Knn probabilities: {kn_clf.predict_proba(anon_file)}', file=f)
+            print('\n', file=f)
+
+            # Logistic regression
+            lg_clf = LogisticRegression(random_state=25)
+            lg_clf.fit(x_train, y_train)
+            y_predicts2 = lg_clf.predict(anon_file)
+
+            if args.verbose:
+                print(f'Logistic classifier decision: {lb.inverse_transform(y_predicts2)}')
+                print(f'Logistic probabilities: {lg_clf.predict_proba(anon_file)}')
+                print('\n')
+
+            print(f'Logistic classifier decision: {lb.inverse_transform(y_predicts2)}', file=f)
+            print(f'Logistic probabilities: {lg_clf.predict_proba(anon_file)}', file=f)
+
+            # Random forest classifier
+            fr_clf = RandomForestClassifier(random_state=25)
+            fr_clf.fit(x_train, y_train)
+            y_predicts3 = fr_clf.predict(anon_file)
+
+            if args.verbose:
+                print(f'Random forest decision: {lb.inverse_transform(y_predicts3)}')
+                print(f'Random probabilities: {fr_clf.predict_proba(anon_file)}')
+                print('\n')
+
+            print(f'Random forest decision: {lb.inverse_transform(y_predicts3)}', file=f)
+            print(f'Random probabilities: {fr_clf.predict_proba(anon_file)}', file=f)
+
+        # if args.research:
+        #
+        #     p = Path(t_file)
+        #     anon_file = parse_bin(name=p.name, path=p.parent, simple=False)
+        #     draw_bar(anon_file, save_name=str(p.name))
+        #
+        #     bin_files = get_files(DIR)
+        #     bin_classes = [name.split('.')[0] for name in bin_files]
+        #     gold_df = make_pd(bin_files)
+        #
+        #     # encode labels
+        #     lb = LabelEncoder()
+        #     gold_df['labels'] = lb.fit_transform(gold_df['class'])
+        #     gold_df = gold_df.drop(['class'], axis=1)
+        #
+        #     # Start making KNN clf
+        #     x_train = gold_df.drop(['labels'], axis=1)
+        #     y_train = gold_df['labels']
+        #
+        #     # KNN clf
+        #     kn_clf = KNeighborsClassifier(n_neighbors=3)
+        #     kn_clf.fit(x_train, y_train)
+        #
+        #     with open(p.parent / args.output, 'w') as f:
+        #         y_predicts = kn_clf.predict(anon_file)
+        #
+        #         if args.verbose:
+        #             print(f'Knn classifier: {lb.inverse_transform(y_predicts)}')
+        #             print(f'Knn probabilities: {kn_clf.predict_proba(anon_file)}')
+        #             print('\n')
+        #
+        #         print(f'Knn classifier: {lb.inverse_transform(y_predicts)}', file=f)
+        #         print(f'Knn probabilities: {kn_clf.predict_proba(anon_file)}', file=f)
+        #         print('\n', file=f)
+        #
+        #         # Logistic regression
+        #         lg_clf = LogisticRegression(random_state=25)
+        #         lg_clf.fit(x_train, y_train)
+        #         y_predicts2 = lg_clf.predict(anon_file)
+        #
+        #         if args.verbose:
+        #             print(f'Logistic classifier decision: {lb.inverse_transform(y_predicts2)}')
+        #             print(f'Logistic probabilities: {lg_clf.predict_proba(anon_file)}')
+        #             print('\n')
+        #
+        #         print(f'Logistic classifier decision: {lb.inverse_transform(y_predicts2)}', file=f)
+        #         print(f'Logistic probabilities: {lg_clf.predict_proba(anon_file)}', file=f)
+        #
+        #         # Random forest classifier
+        #         fr_clf = RandomForestClassifier(random_state=25)
+        #         fr_clf.fit(x_train, y_train)
+        #         y_predicts3 = fr_clf.predict(anon_file)
+        #
+        #         if args.verbose:
+        #             print(f'Random forest decision: {lb.inverse_transform(y_predicts3)}')
+        #             print(f'Random probabilities: {fr_clf.predict_proba(anon_file)}')
+        #             print('\n')
+        #
+        #         print(f'Random forest decision: {lb.inverse_transform(y_predicts3)}', file=f)
+        #         print(f'Random probabilities: {fr_clf.predict_proba(anon_file)}', file=f)
+
 if __name__ == '__main__':
-    #  make dirs for results
-    # make_dir_results()
+    main()
 
-    curfile = 'test_Armv7a'
-    folder = 'elf_arch'
-    curpath_to_target = BASE_PATH / 'experiment' / folder
 
-    # if filename has 2 '_' add -> f'{curfile.split("_")[2]}
 
-    curpath_to_save = BASE_PATH / 'experiment' / 'results' / f'{curfile.split("_")[1]}'
-    anon_file = parse_bin(name=curfile, path=curpath_to_target)
-    draw_bar(anon_file, save_name=str(curfile))
-
-    bin_files = get_files(DIR)
-    bin_classes = [name.split('.')[0] for name in bin_files]
-    gold_df = make_pd(bin_files)
-    # encode labels
-    lb = LabelEncoder()
-    gold_df['labels'] = lb.fit_transform(gold_df['class'])
-    gold_df = gold_df.drop(['class'], axis=1)
-
-    # Start making KNN clf
-    x_train = gold_df.drop(['labels'], axis=1)
-    y_train = gold_df['labels']
-
-    # KNN clf
-    kn_clf = KNeighborsClassifier(n_neighbors=3)
-    kn_clf.fit(x_train, y_train)
-
-    with open(f'{curpath_to_save}\\res.txt', 'w') as f:
-
-        y_predicts = kn_clf.predict(anon_file)
-        print(f'Knn classifier: {lb.inverse_transform(y_predicts)}')
-        print(f'Knn probabilities: {kn_clf.predict_proba(anon_file)}')
-        print('\n')
-
-        print(f'Knn classifier: {lb.inverse_transform(y_predicts)}', file=f)
-        print(f'Knn probabilities: {kn_clf.predict_proba(anon_file)}', file=f)
-        print('\n', file=f)
-
-        # Logistic regression
-        lg_clf = LogisticRegression(random_state=25)
-        lg_clf.fit(x_train, y_train)
-        y_predicts2 = lg_clf.predict(anon_file)
-
-        print(f'Logistic classifier decision: {lb.inverse_transform(y_predicts2)}')
-        print(f'Logistic probabilities: {lg_clf.predict_proba(anon_file)}')
-
-        print(f'Logistic classifier decision: {lb.inverse_transform(y_predicts2)}', file=f)
-        print(f'Logistic probabilities: {lg_clf.predict_proba(anon_file)}', file=f)
-
-        # Random forest classifier
-        fr_clf = RandomForestClassifier(random_state=25)
-        fr_clf.fit(x_train, y_train)
-        y_predicts3 = fr_clf.predict(anon_file)
-
-        print(f'Random forest decision: {lb.inverse_transform(y_predicts3)}')
-        print(f'Random probabilities: {fr_clf.predict_proba(anon_file)}')
-
-        print(f'Random forest decision: {lb.inverse_transform(y_predicts3)}', file=f)
-        print(f'Random probabilities: {fr_clf.predict_proba(anon_file)}', file=f)
